@@ -228,6 +228,13 @@ class GatedDeltaNet(MegatronModule):
 
         self.reset_parameters()
 
+        self.fla_supported = True
+        try:
+            import torch_npu
+            self.fla_supported = False if torch.npu.is_available() else True
+        except:
+            pass
+
     def reset_parameters(self):
         """Reset the parameters."""
         if self.config.perform_initialization:
@@ -350,8 +357,13 @@ class GatedDeltaNet(MegatronModule):
         value = value.reshape(batch, seq_len, -1, self.value_head_dim)
         # Apply L2 norm to query and key
         if self.use_qk_l2norm:
-            query = l2norm(query.contiguous())
-            key = l2norm(key.contiguous())
+            # Use PyTorch-native l2norm instead of fla's triton kernel
+            # which produces NaN in backward on Ascend NPU
+            def _l2norm_torch(x, eps=1e-6):
+                norm = torch.norm(x, p=2, dim=-1, keepdim=True).clamp(min=eps)
+                return x / norm
+            query = _l2norm_torch(query.contiguous())
+            key = _l2norm_torch(key.contiguous())
         if self.num_value_heads // self.num_key_heads > 1:
             query = query.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
             key = key.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
@@ -371,7 +383,7 @@ class GatedDeltaNet(MegatronModule):
         nvtx_range_pop(suffix="g_and_beta")
 
         nvtx_range_push(suffix="gated_delta_rule")
-        if self.config.deterministic_mode:
+        if self.config.deterministic_mode or not self.fla_supported:
             core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
                 query,
                 key,
@@ -607,8 +619,12 @@ def torch_chunk_gated_delta_rule(
 
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
-        query = l2norm(query, dim=-1, eps=1e-6)
-        key = l2norm(key, dim=-1, eps=1e-6)
+        # Use PyTorch-native l2norm instead of fla's triton kernel
+        def _l2norm_torch(x, dim=-1, eps=1e-6):
+            norm = torch.norm(x, p=2, dim=dim, keepdim=True).clamp(min=eps)
+            return x / norm
+        query = _l2norm_torch(query, dim=-1, eps=1e-6)
+        key = _l2norm_torch(key, dim=-1, eps=1e-6)
     query, key, value, beta, g = [
         x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
     ]
