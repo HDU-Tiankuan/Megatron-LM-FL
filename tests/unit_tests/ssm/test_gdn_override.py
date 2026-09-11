@@ -37,7 +37,9 @@ def test_deterministic_keeps_native_selection(monkeypatch):
     native = Mock(return_value=('reference', None))
     optimized = Mock(side_effect=AssertionError('must not enter optimized GDN'))
     monkeypatch.setattr(P, 'chunk_gated_delta_rule', optimized)
-    layer = SimpleNamespace(config=SimpleNamespace(deterministic_mode=True), gated_delta_rule=native)
+    layer = SimpleNamespace(
+        config=SimpleNamespace(deterministic_mode=True), gated_delta_rule=native
+    )
     q, k, v, cu = (object() for _ in range(4))
     assert GatedDeltaNet._gated_delta_rule(layer, q, k, v, cu_seqlens=cu)[0] == 'reference'
     native.assert_called_once_with(q, k, v, cu_seqlens=cu)
@@ -53,8 +55,7 @@ def test_non_npu_keeps_native_selection(monkeypatch):
     native.assert_called_once_with(*args, **opts)
 
 
-@pytest.mark.parametrize('vendor,target,helper', [
-    ('npu', P, 'l2norm'), ('cpu', CORE, 'l2norm')])
+@pytest.mark.parametrize('vendor,target,helper', [('npu', P, 'l2norm'), ('cpu', CORE, 'l2norm')])
 def test_normalization_dispatch(monkeypatch, vendor, target, helper):
     monkeypatch.setenv('MG_FL_PREFER', vendor)
     fn = Mock(return_value='normalized')
@@ -75,7 +76,9 @@ def test_convolution_dispatch_preserves_arguments(monkeypatch, vendor, target):
 
 
 def test_kernel_error_propagates(monkeypatch):
-    monkeypatch.setattr(P, 'chunk_gated_delta_rule', Mock(side_effect=RuntimeError('kernel failed')))
+    monkeypatch.setattr(
+        P, 'chunk_gated_delta_rule', Mock(side_effect=RuntimeError('kernel failed'))
+    )
     layer = SimpleNamespace(config=SimpleNamespace(deterministic_mode=False))
     with pytest.raises(RuntimeError, match='kernel failed'):
         GatedDeltaNet._gated_delta_rule(layer, None, None, None)
@@ -84,9 +87,12 @@ def test_kernel_error_propagates(monkeypatch):
 def test_core_decorator_placement():
     import ast
     from pathlib import Path
+
     module = ast.parse(Path(CORE.__file__).read_text())
     cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "GatedDeltaNet")
     methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
     for name in ("_normalize_qk", "_gated_delta_rule", "_causal_conv1d"):
         assert [ast.unparse(d) for d in methods[name].decorator_list] == ["overridable"]
-    assert [ast.unparse(d) for d in methods["_prepare_qkv_for_gated_delta_rule"].decorator_list] == ["jit_fuser"]
+    assert [
+        ast.unparse(d) for d in methods["_prepare_qkv_for_gated_delta_rule"].decorator_list
+    ] == ["jit_fuser"]
