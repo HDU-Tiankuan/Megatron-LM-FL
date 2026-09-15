@@ -56,7 +56,6 @@ from megatron.core.transformer.utils import (
     make_sharded_tensors_for_checkpoint,
 )
 from megatron.core.typed_torch import copy_signature
-from megatron.plugin.decorators import overridable  # FlagScale Modify
 from megatron.core.utils import (
     get_pg_rank,
     get_pg_size,
@@ -65,6 +64,7 @@ from megatron.core.utils import (
     is_te_min_version,
     is_torch_min_version,
 )
+from megatron.plugin.decorators import overridable  # FlagScale Modify
 
 try:
     import transformer_engine as te
@@ -381,7 +381,9 @@ def _get_extra_te_kwargs(config: TransformerConfig):
         elif config.init_model_with_meta_device:
             extra_transformer_engine_kwargs["device"] = "meta"
         else:
-            extra_transformer_engine_kwargs["device"] = cur_platform.current_device()  # FlagScale Modify
+            extra_transformer_engine_kwargs["device"] = (
+                cur_platform.current_device()
+            )  # FlagScale Modify
     return extra_transformer_engine_kwargs
 
 
@@ -1781,7 +1783,11 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
             ),
             attn_mask_type=attn_mask_type.name,
             sequence_parallel=self.config.sequence_parallel,
-            tp_size=self.config.tensor_model_parallel_size if get_parallel_context() is None else get_tensor_model_parallel_world_size(),  # FlagScale Modify
+            tp_size=(
+                self.config.tensor_model_parallel_size
+                if get_parallel_context() is None
+                else get_tensor_model_parallel_world_size()
+            ),  # FlagScale Modify
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
@@ -2051,6 +2057,10 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             # doing so would change num-zeros gradient counting.
             if self.explicit_expert_comm and original_parallel_mode in ("column", "row"):
                 part_dim = 0 if original_parallel_mode == "column" else 1
+                grouped_weight = getattr(self, "weight", None)
+                if grouped_weight is not None and grouped_weight.ndim == 3:
+                    setattr(grouped_weight, "partition_dim", part_dim + 1)
+                    setattr(grouped_weight, "partition_stride", 1)
                 for i in range(num_gemms):
                     weight = getattr(self, f"weight{i}", None)
                     if weight is not None:
@@ -2234,6 +2244,18 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 self.te_quant_params, self.training, is_context_quantized
             )
 
+        @overridable
+        def make_grouped_weights(self, defer_init=False):
+            return super().make_grouped_weights(defer_init=defer_init)
+
+        @overridable
+        def _get_weight_tensors(self):
+            return super()._get_weight_tensors()
+
+        @overridable
+        def _forward_grouped_linear(self, x, m_splits, is_first_microbatch=None):
+            return super().forward(x, m_splits, is_first_microbatch=is_first_microbatch)
+
         def forward(self, x, m_splits):
             """Forward."""
             _is_first_microbatch = (
@@ -2242,7 +2264,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
             with quant_context:
-                out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
+                out = self._forward_grouped_linear(x, m_splits, _is_first_microbatch)
             self.is_first_microbatch = False
 
             # TE only returns a tuple when return_bias is True, otherwise
@@ -2399,6 +2421,42 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 else:
                     edp_replica_id = get_pg_rank(self._pg_collection.expt_dp)
                 sh_ten.replica_id = (*replica_id[:2], edp_replica_id)
+            # Keep the real dense parent identity for distributed optimizer state
+            # mapping. Returning only detached expert views loses that identity.
+            weight = getattr(self, "weight", None)
+            if weight is not None and type(weight) is torch.nn.Parameter and weight.ndim == 3:
+                from dataclasses import replace
+
+                from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
+
+                if singleton_local_shards:
+                    raise NotImplementedError(
+                        "Dense grouped weights require singleton_local_shards=False"
+                    )
+                shape = tuple(weight.shape)
+                templates = [
+                    replace(sharded_state_dict.pop(f"{prefix}weight{i}"), data=None)
+                    for i in range(self.num_gemms)
+                ]
+
+                def build(key, tensor, replica_id, flattened_range):
+                    if flattened_range is not None:
+                        raise NotImplementedError(
+                            "Dense grouped weight checkpoint requires fully_reshardable format"
+                        )
+                    return [
+                        replace(
+                            template, key=key, data=chunk, dtype=tensor.dtype, replica_id=replica_id
+                        )
+                        for template, chunk in zip(templates, tensor.reshape(shape).unbind(0))
+                    ]
+
+                def merge(shards):
+                    return torch.stack(shards, dim=0)
+
+                sharded_state_dict[f"{prefix}weight"] = ShardedTensorFactory(
+                    templates[0].key, weight, build, merge, templates[0].replica_id
+                )
             return sharded_state_dict
 
         def backward_dw(self):

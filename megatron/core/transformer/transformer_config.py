@@ -19,14 +19,15 @@ from megatron.core.transformer.cuda_graph_config import (
     normalize_inference_cuda_graph_scope,
     validate_deprecated_cuda_graph_modules_migration_inputs,
 )
+from megatron.core.transformer.enums import LayerType  # FlagScale Modify
 from megatron.core.transformer.enums import (
     AttnBackend,
     CudaGraphModule,
     CudaGraphScope,
     InferenceCudaGraphScope,
-    LayerType,  # FlagScale Modify
 )
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+from megatron.plugin.decorators import overridable  # FlagScale Modify
 
 from .._rank_utils import log_single_rank
 from ..fusions.fused_bias_geglu import quick_gelu
@@ -39,7 +40,7 @@ from ..utils import (
     mup_scaled_init_method_normal,
     scaled_init_method_normal,
 )
-from megatron.plugin.decorators import overridable  # FlagScale Modify
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -1352,6 +1353,7 @@ class TransformerConfig(ModelParallelConfig):
 
     lora_out_init_method: str = "zero"
     """Initialization method for LoRA B matrix."""
+
     ######## FlagScale End ########
     @overridable  # FlagScale Modify
     def __post_init__(self):
@@ -1705,7 +1707,10 @@ class TransformerConfig(ModelParallelConfig):
             # NVIDIA/Megatron-LM#4621. Reject at construction time so users don't silently
             # train on a broken numerical path. (moe_single_grouped_bias is not gated:
             # biases aren't quantized, so they don't enter the buggy code path.)
-            if self.fp4 or not self.fp8 or self.fp8_recipe != Fp8Recipe.mxfp8:
+            dense_supported = _supports_dense_grouped_weight(self)
+            if not dense_supported and (
+                self.fp4 or not self.fp8 or self.fp8_recipe != Fp8Recipe.mxfp8
+            ):
                 raise ValueError(
                     "moe_single_grouped_weight is currently supported only with fp8 mode "
                     "and fp8_recipe='mxfp8'."
@@ -3025,7 +3030,9 @@ class TransformerConfig(ModelParallelConfig):
                 )
 
         return result
+
     ######## FlagScale End ########
+
 
 @dataclass
 class MLATransformerConfig(TransformerConfig):
@@ -3136,3 +3143,16 @@ class MLATransformerConfig(TransformerConfig):
             assert (
                 self.apply_rope_fusion is False
             ), "Rope Fusion is not compatible with caching latents"
+
+
+@overridable
+def _supports_dense_grouped_weight(config):
+    """Whether the selected adapter supports an unquantized parent Parameter."""
+    from transformer_engine.pytorch import GroupedLinear
+
+    return (
+        not config.fp8
+        and not config.fp4
+        and getattr(GroupedLinear, "supports_dense_single_grouped_weight", False)
+        and not config.gradient_accumulation_fusion
+    )

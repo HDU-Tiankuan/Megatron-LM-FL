@@ -11,7 +11,6 @@ The ``@override`` decorator on the implementation function is no longer needed.
 
 from megatron.plugin.decorators import register
 
-
 # =============================================================================
 # Optimizer - clip_grads
 # =============================================================================
@@ -176,5 +175,58 @@ register(
 register(
     target="megatron.core.transformer.transformer_config.TransformerConfig",
     impl="megatron.plugin.Ascend.transformer.transformer_config.NPUTransformerConfig",
+    vendor="npu",
+)
+
+# =============================================================================
+# SSM - gated_delta_net (FLA kernels)
+# =============================================================================
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._normalize_qk",
+    impl="megatron.plugin.Ascend.ssm.chunk_gated_delta_rule.normalize_qk",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._gated_delta_rule",
+    impl="megatron.plugin.Ascend.ssm.chunk_gated_delta_rule.gated_delta_rule",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._causal_conv1d",
+    impl="megatron.plugin.Ascend.ssm.causal_conv1d.gated_delta_net_conv1d",
+    vendor="npu",
+)
+
+
+# Gradient clipping: in-place scale only.
+register(
+    target="megatron.core.optimizer.clip_grads._scale_grads",
+    impl="megatron.plugin.Ascend.optimizer.clip_grads._scale_grads",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.transformer.transformer_config._supports_dense_grouped_weight",
+    impl="megatron.plugin.Ascend.grouped_linear.supports_dense_grouped_weight",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.extensions.transformer_engine.TEGroupedLinear.make_grouped_weights",
+    impl="megatron.plugin.Ascend.grouped_linear.make_grouped_weights",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.extensions.transformer_engine.TEGroupedLinear._get_weight_tensors",
+    impl="megatron.plugin.Ascend.grouped_linear.get_weight_tensors",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.extensions.transformer_engine.TEGroupedLinear._forward_grouped_linear",
+    impl="megatron.plugin.Ascend.grouped_linear.forward_grouped_linear",
     vendor="npu",
 )

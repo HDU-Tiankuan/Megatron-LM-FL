@@ -112,7 +112,11 @@ def get_grad_norm_fp32(
     # Calculate norm.
     if norm_type == inf:
         total_norm = max(grad.abs().max() for grad in grads_for_norm)
-        total_norm_cuda = torch.tensor([float(total_norm)], dtype=torch.float, device=cur_platform.device(cur_platform.current_device()))
+        total_norm_cuda = torch.tensor(
+            [float(total_norm)],
+            dtype=torch.float,
+            device=cur_platform.device(cur_platform.current_device()),
+        )
         # Take max across all data-parallel GPUs if using FSDP and then all model-parallel GPUs.
         if data_parallel_group:
             torch.distributed.all_reduce(
@@ -125,7 +129,9 @@ def get_grad_norm_fp32(
 
     else:
         if norm_type == 2.0:
-            dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=cur_platform.device(cur_platform.current_device()))
+            dummy_overflow_buf = torch.zeros(
+                1, dtype=torch.int, device=cur_platform.device(cur_platform.current_device())
+            )
             # Use apex's multi-tensor applier for efficiency reasons.
             # Multi-tensor applier takes a function and a list of list
             # and performs the operation on that list all in one kernel.
@@ -137,7 +143,9 @@ def get_grad_norm_fp32(
                     False,  # no per-parameter norm
                 )
             else:
-                grad_norm = torch.zeros(1, dtype=torch.float, device=cur_platform.device(cur_platform.current_device()))
+                grad_norm = torch.zeros(
+                    1, dtype=torch.float, device=cur_platform.device(cur_platform.current_device())
+                )
             # Since we will be summing across data parallel groups,
             # we need the pow(norm-type).
             total_norm = grad_norm**norm_type
@@ -206,7 +214,15 @@ def clip_grad_by_total_norm_fp32(
 
     # Scale.
     clip_coeff = max_norm / (total_norm + 1.0e-6)
-    dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=cur_platform.device(cur_platform.current_device()))
+    _scale_grads(grads, clip_coeff)
+
+
+@overridable
+def _scale_grads(grads: List[torch.Tensor], clip_coeff: Union[float, torch.Tensor]):
+    """Scale detached gradients in place; the overflow result is not consumed."""
+    dummy_overflow_buf = torch.zeros(
+        1, dtype=torch.int, device=cur_platform.device(cur_platform.current_device())
+    )
     if isinstance(clip_coeff, torch.Tensor):
         clip_coeff.clamp_max_(1.0)
         assert (
